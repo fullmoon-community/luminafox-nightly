@@ -97,7 +97,7 @@ const PREF_XPI_FILE_WHITELISTED = "xpinstall.whitelist.fileRequest";
 const PREF_XPI_WHITELIST_REQUIRED = "xpinstall.whitelist.required";
 const PREF_XPI_WEAK_SIGNATURES_ALLOWED =
   "xpinstall.signatures.weakSignaturesTemporarilyAllowed";
-const PREF_XPI_WEAK_SIGNATURES_ALLOWED_DEFAULT = true;
+const PREF_XPI_WEAK_SIGNATURES_ALLOWED_DEFAULT = !AppConstants.NIGHTLY_BUILD;
 
 const PREF_SELECTED_THEME = "extensions.activeThemeID";
 
@@ -1664,12 +1664,13 @@ class AddonInstall {
           this.addon.signedDate &&
           !hasStrongSignature(this.addon)
         ) {
-          const addonAllowedByPolicies = Services.policies.getExtensionSettings(
-            this.addon.id
-          )?.temporarily_allow_weak_signatures;
+          const addonAllowedByPolicies =
+            Services.policies?.getExtensionSettings(
+              this.addon.id
+            )?.temporarily_allow_weak_signatures;
 
           const globallyAllowedByPolicies =
-            Services.policies.getExtensionSettings(
+            Services.policies?.getExtensionSettings(
               "*"
             )?.temporarily_allow_weak_signatures;
 

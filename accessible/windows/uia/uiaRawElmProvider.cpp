@@ -13,6 +13,8 @@
 #include "AccessibleWrap.h"
 #include "ApplicationAccessible.h"
 #include "ARIAMap.h"
+#include "ia2AccessibleTable.h"
+#include "ia2AccessibleTableCell.h"
 #include "LocalAccessible-inl.h"
 #include "mozilla/a11y/RemoteAccessible.h"
 #include "mozilla/StaticPrefs_accessibility.h"
@@ -52,6 +54,11 @@ static ExpandCollapseState ToExpandCollapseState(uint64_t aState) {
   return ExpandCollapseState_LeafNode;
 }
 
+static bool IsRadio(Accessible* aAcc) {
+  role r = aAcc->Role();
+  return r == roles::RADIOBUTTON || r == roles::RADIO_MENU_ITEM;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // uiaRawElmProvider
 ////////////////////////////////////////////////////////////////////////////////
@@ -85,6 +92,20 @@ void uiaRawElmProvider::RaiseUiaEventForGeckoEvent(Accessible* aAcc,
     case nsIAccessibleEvent::EVENT_NAME_CHANGE:
       property = UIA_NamePropertyId;
       break;
+    case nsIAccessibleEvent::EVENT_SELECTION:
+      ::UiaRaiseAutomationEvent(uia, UIA_SelectionItem_ElementSelectedEventId);
+      return;
+    case nsIAccessibleEvent::EVENT_SELECTION_ADD:
+      ::UiaRaiseAutomationEvent(
+          uia, UIA_SelectionItem_ElementAddedToSelectionEventId);
+      return;
+    case nsIAccessibleEvent::EVENT_SELECTION_REMOVE:
+      ::UiaRaiseAutomationEvent(
+          uia, UIA_SelectionItem_ElementRemovedFromSelectionEventId);
+      return;
+    case nsIAccessibleEvent::EVENT_SELECTION_WITHIN:
+      ::UiaRaiseAutomationEvent(uia, UIA_Selection_InvalidatedEventId);
+      return;
     case nsIAccessibleEvent::EVENT_TEXT_VALUE_CHANGE:
       property = UIA_ValueValuePropertyId;
       newVal.vt = VT_BSTR;
@@ -124,6 +145,13 @@ void uiaRawElmProvider::RaiseUiaEventForStateChange(Accessible* aAcc,
   _variant_t newVal;
   switch (aState) {
     case states::CHECKED:
+      if (aEnabled && IsRadio(aAcc)) {
+        ::UiaRaiseAutomationEvent(uia,
+                                  UIA_SelectionItem_ElementSelectedEventId);
+        return;
+      }
+      // For other checkable things, the Toggle pattern is used.
+      [[fallthrough]];
     case states::MIXED:
     case states::PRESSED:
       property = UIA_ToggleToggleStatePropertyId;
@@ -172,6 +200,10 @@ uiaRawElmProvider::QueryInterface(REFIID aIid, void** aInterface) {
     *aInterface = static_cast<IRangeValueProvider*>(this);
   } else if (aIid == IID_IScrollItemProvider) {
     *aInterface = static_cast<IScrollItemProvider*>(this);
+  } else if (aIid == IID_ISelectionItemProvider) {
+    *aInterface = static_cast<ISelectionItemProvider*>(this);
+  } else if (aIid == IID_ISelectionProvider) {
+    *aInterface = static_cast<ISelectionProvider*>(this);
   } else if (aIid == IID_IToggleProvider) {
     *aInterface = static_cast<IToggleProvider*>(this);
   } else if (aIid == IID_IValueProvider) {
@@ -277,12 +309,25 @@ uiaRawElmProvider::GetPatternProvider(
         expand.forget(aPatternProvider);
       }
       return S_OK;
+    case UIA_GridPatternId:
+      if (acc->IsTable()) {
+        auto grid = GetPatternFromDerived<ia2AccessibleTable, IGridProvider>();
+        grid.forget(aPatternProvider);
+      }
+      return S_OK;
+    case UIA_GridItemPatternId:
+      if (acc->IsTableCell()) {
+        auto item =
+            GetPatternFromDerived<ia2AccessibleTableCell, IGridItemProvider>();
+        item.forget(aPatternProvider);
+      }
+      return S_OK;
     case UIA_InvokePatternId:
       // Per the UIA documentation, we should only expose the Invoke pattern "if
       // the same behavior is not exposed through another control pattern
       // provider".
       if (acc->ActionCount() > 0 && !HasTogglePattern() &&
-          !HasExpandCollapsePattern()) {
+          !HasExpandCollapsePattern() && !HasSelectionItemPattern()) {
         RefPtr<IInvokeProvider> invoke = this;
         invoke.forget(aPatternProvider);
       }
@@ -298,6 +343,44 @@ uiaRawElmProvider::GetPatternProvider(
       scroll.forget(aPatternProvider);
       return S_OK;
     }
+    case UIA_SelectionItemPatternId:
+      if (HasSelectionItemPattern()) {
+        RefPtr<ISelectionItemProvider> item = this;
+        item.forget(aPatternProvider);
+      }
+      return S_OK;
+    case UIA_SelectionPatternId:
+      // According to the UIA documentation, radio button groups should support
+      // the Selection pattern. However:
+      // 1. The Core AAM spec doesn't specify the Selection pattern for
+      // the radiogroup role.
+      // 2. HTML radio buttons might not be contained by a dedicated group.
+      // 3. Chromium exposes the Selection pattern on radio groups, but it
+      // doesn't expose any selected items, even when there is a checked radio
+      // child.
+      // 4. Radio menu items are similar to radio buttons and all the above
+      // also applies to menus.
+      // For now, we don't support the Selection pattern for radio groups or
+      // menus, only for list boxes, tab lists, etc.
+      if (acc->IsSelect()) {
+        RefPtr<ISelectionProvider> selection = this;
+        selection.forget(aPatternProvider);
+      }
+      return S_OK;
+    case UIA_TablePatternId:
+      if (acc->IsTable()) {
+        auto table =
+            GetPatternFromDerived<ia2AccessibleTable, ITableProvider>();
+        table.forget(aPatternProvider);
+      }
+      return S_OK;
+    case UIA_TableItemPatternId:
+      if (acc->IsTableCell()) {
+        auto item =
+            GetPatternFromDerived<ia2AccessibleTableCell, ITableItemProvider>();
+        item.forget(aPatternProvider);
+      }
+      return S_OK;
     case UIA_TogglePatternId:
       if (HasTogglePattern()) {
         RefPtr<IToggleProvider> toggle = this;
@@ -893,6 +976,130 @@ uiaRawElmProvider::get_SmallChange(
   return S_OK;
 }
 
+// ISelectionProvider methods
+
+STDMETHODIMP
+uiaRawElmProvider::GetSelection(__RPC__deref_out_opt SAFEARRAY** aRetVal) {
+  if (!aRetVal) {
+    return E_INVALIDARG;
+  }
+  *aRetVal = nullptr;
+  Accessible* acc = Acc();
+  if (!acc) {
+    return CO_E_OBJNOTCONNECTED;
+  }
+  AutoTArray<Accessible*, 10> items;
+  acc->SelectedItems(&items);
+  *aRetVal = AccessibleArrayToUiaArray(items);
+  return S_OK;
+}
+
+STDMETHODIMP
+uiaRawElmProvider::get_CanSelectMultiple(__RPC__out BOOL* aRetVal) {
+  if (!aRetVal) {
+    return E_INVALIDARG;
+  }
+  Accessible* acc = Acc();
+  if (!acc) {
+    return CO_E_OBJNOTCONNECTED;
+  }
+  *aRetVal = acc->State() & states::MULTISELECTABLE;
+  return S_OK;
+}
+
+STDMETHODIMP
+uiaRawElmProvider::get_IsSelectionRequired(__RPC__out BOOL* aRetVal) {
+  if (!aRetVal) {
+    return E_INVALIDARG;
+  }
+  Accessible* acc = Acc();
+  if (!acc) {
+    return CO_E_OBJNOTCONNECTED;
+  }
+  *aRetVal = acc->State() & states::REQUIRED;
+  return S_OK;
+}
+
+// ISelectionItemProvider methods
+
+STDMETHODIMP
+uiaRawElmProvider::Select() {
+  Accessible* acc = Acc();
+  if (!acc) {
+    return CO_E_OBJNOTCONNECTED;
+  }
+  if (IsRadio(acc)) {
+    acc->DoAction(0);
+  } else {
+    acc->TakeSelection();
+  }
+  return S_OK;
+}
+
+STDMETHODIMP
+uiaRawElmProvider::AddToSelection() {
+  Accessible* acc = Acc();
+  if (!acc) {
+    return CO_E_OBJNOTCONNECTED;
+  }
+  if (IsRadio(acc)) {
+    acc->DoAction(0);
+  } else {
+    acc->SetSelected(true);
+  }
+  return S_OK;
+}
+
+STDMETHODIMP
+uiaRawElmProvider::RemoveFromSelection() {
+  Accessible* acc = Acc();
+  if (!acc) {
+    return CO_E_OBJNOTCONNECTED;
+  }
+  if (IsRadio(acc)) {
+    return UIA_E_INVALIDOPERATION;
+  }
+  acc->SetSelected(false);
+  return S_OK;
+}
+
+STDMETHODIMP
+uiaRawElmProvider::get_IsSelected(__RPC__out BOOL* aRetVal) {
+  if (!aRetVal) {
+    return E_INVALIDARG;
+  }
+  Accessible* acc = Acc();
+  if (!acc) {
+    return CO_E_OBJNOTCONNECTED;
+  }
+  if (IsRadio(acc)) {
+    *aRetVal = acc->State() & states::CHECKED;
+  } else {
+    *aRetVal = acc->State() & states::SELECTED;
+  }
+  return S_OK;
+}
+
+STDMETHODIMP
+uiaRawElmProvider::get_SelectionContainer(
+    __RPC__deref_out_opt IRawElementProviderSimple** aRetVal) {
+  if (!aRetVal) {
+    return E_INVALIDARG;
+  }
+  *aRetVal = nullptr;
+  Accessible* acc = Acc();
+  if (!acc) {
+    return CO_E_OBJNOTCONNECTED;
+  }
+  Accessible* container = nsAccUtils::GetSelectableContainer(acc, acc->State());
+  if (!container) {
+    return E_FAIL;
+  }
+  RefPtr<IRawElementProviderSimple> uia = MsaaAccessible::GetFrom(container);
+  uia.forget(aRetVal);
+  return S_OK;
+}
+
 // Private methods
 
 bool uiaRawElmProvider::IsControl() {
@@ -997,4 +1204,41 @@ bool uiaRawElmProvider::HasValuePattern() const {
   }
   const nsRoleMapEntry* roleMapEntry = acc->ARIARoleMap();
   return roleMapEntry && roleMapEntry->Is(nsGkAtoms::textbox);
+}
+
+template <class Derived, class Interface>
+RefPtr<Interface> uiaRawElmProvider::GetPatternFromDerived() {
+  // MsaaAccessible inherits from uiaRawElmProvider. Derived
+  // inherits from MsaaAccessible and Interface. The compiler won't let us
+  // directly static_cast to Interface, hence the intermediate casts.
+  auto* msaa = static_cast<MsaaAccessible*>(this);
+  auto* derived = static_cast<Derived*>(msaa);
+  return derived;
+}
+
+bool uiaRawElmProvider::HasSelectionItemPattern() {
+  Accessible* acc = Acc();
+  MOZ_ASSERT(acc);
+  // In UIA, radio buttons and radio menu items are exposed as selected or
+  // unselected.
+  return acc->State() & states::SELECTABLE || IsRadio(acc);
+}
+
+SAFEARRAY* a11y::AccessibleArrayToUiaArray(const nsTArray<Accessible*>& aAccs) {
+  if (aAccs.IsEmpty()) {
+    // The UIA documentation is unclear about this, but the UIA client
+    // framework seems to treat a null value the same as an empty array. This
+    // is also what Chromium does.
+    return nullptr;
+  }
+  SAFEARRAY* uias = SafeArrayCreateVector(VT_UNKNOWN, 0, aAccs.Length());
+  LONG indices[1] = {0};
+  for (Accessible* acc : aAccs) {
+    // SafeArrayPutElement calls AddRef on the element, so we use a raw pointer
+    // here.
+    IRawElementProviderSimple* uia = MsaaAccessible::GetFrom(acc);
+    SafeArrayPutElement(uias, indices, uia);
+    ++indices[0];
+  }
+  return uias;
 }

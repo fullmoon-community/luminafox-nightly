@@ -4,7 +4,6 @@
 
 package mozilla.components.browser.engine.gecko
 
-import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.Build
 import android.view.WindowManager
@@ -58,6 +57,7 @@ import mozilla.components.support.base.facts.Action
 import mozilla.components.support.base.facts.Fact
 import mozilla.components.support.base.facts.collect
 import mozilla.components.support.base.log.logger.Logger
+import mozilla.components.support.ktx.kotlin.decode
 import mozilla.components.support.ktx.kotlin.isEmail
 import mozilla.components.support.ktx.kotlin.isExtensionUrl
 import mozilla.components.support.ktx.kotlin.isGeoLocation
@@ -557,9 +557,8 @@ class GeckoEngineSession(
     /**
      * See [EngineSession.findNext]
      */
-    @SuppressLint("WrongConstant") // FinderFindFlags annotation doesn't include a 0 value.
     override fun findNext(forward: Boolean) {
-        val findFlags = if (forward) 0 else GeckoSession.FINDER_FIND_BACKWARDS
+        val findFlags = if (forward) GeckoSession.FINDER_FIND_FORWARD else GeckoSession.FINDER_FIND_BACKWARDS
         geckoSession.finder.find(null, findFlags).then { result: GeckoSession.FinderResult? ->
             result?.let {
                 val activeMatchOrdinal = if (it.current > 0) it.current - 1 else it.current
@@ -1526,7 +1525,7 @@ class GeckoEngineSession(
                         url = url,
                         contentLength = contentLength,
                         contentType = DownloadUtils.sanitizeMimeType(contentType),
-                        fileName = fileName.sanitizeFileName(),
+                        fileName = fileName.sanitizeFileName().decode(),
                         response = response,
                         isPrivate = privateMode,
                         openInApp = webResponse.requestExternalApp,

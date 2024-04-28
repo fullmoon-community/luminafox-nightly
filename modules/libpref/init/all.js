@@ -189,11 +189,10 @@ pref("pdfjs.enableXfa", true);
 pref("pdfjs.enableStampEditor", true);
 
 // Enable highlighting in a pdf.
+pref("pdfjs.enableHighlightEditor", true);
 #if defined(EARLY_BETA_OR_EARLIER)
-  pref("pdfjs.enableHighlightEditor", true);
   pref("pdfjs.enableHighlightFloatingButton", true);
 #else
-  pref("pdfjs.enableHighlightEditor", false);
   pref("pdfjs.enableHighlightFloatingButton", false);
 #endif
 
@@ -345,12 +344,8 @@ pref("media.videocontrols.keyboard-tab-to-all-controls", true);
   #endif
 
   // 770 = DTLS 1.0, 771 = DTLS 1.2, 772 = DTLS 1.3
-pref("media.peerconnection.dtls.version.min", 771);
-#ifdef NIGHTLY_BUILD
+  pref("media.peerconnection.dtls.version.min", 771);
   pref("media.peerconnection.dtls.version.max", 772);
-#else
-  pref("media.peerconnection.dtls.version.max", 771);
-#endif
 
   // These values (aec, agc, and noise) are from:
   // third_party/libwebrtc/modules/audio_processing/include/audio_processing.h
@@ -3569,6 +3564,18 @@ pref("reader.content_width", 3);
 
 // The default relative line height in reader mode (1-9)
 pref("reader.line_height", 4);
+
+// Determines if improved text and layout menu is enabled in reader mode.
+pref("reader.improved_text_menu.enabled", false);
+
+// The default character spacing in reader mode (1-9)
+pref("reader.character_spacing", "");
+
+// The default word spacing in reader mode (1-9)
+pref("reader.word_spacing", "");
+
+// The default text alignment direction in reader mode
+pref("reader.text_alignment", "start");
 
 // The default color scheme in reader mode (light, dark, sepia, auto)
 // auto = color automatically adjusts according to ambient light level

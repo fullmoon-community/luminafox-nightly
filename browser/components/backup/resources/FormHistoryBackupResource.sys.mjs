@@ -20,6 +20,16 @@ export class FormHistoryBackupResource extends BackupResource {
     await BackupResource.copySqliteDatabases(profilePath, stagingPath, [
       "formhistory.sqlite",
     ]);
+
+    return null;
+  }
+
+  async recover(_manifestEntry, recoveryPath, destProfilePath) {
+    await BackupResource.copyFiles(recoveryPath, destProfilePath, [
+      "formhistory.sqlite",
+    ]);
+
+    return null;
   }
 
   async measure(profilePath = PathUtils.profileDir) {

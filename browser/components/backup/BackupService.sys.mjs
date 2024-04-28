@@ -25,6 +25,7 @@ ChromeUtils.defineLazyGetter(lazy, "fxAccounts", () => {
 ChromeUtils.defineESModuleGetters(lazy, {
   JsonSchemaValidator:
     "resource://gre/modules/components-utils/JsonSchemaValidator.sys.mjs",
+  UIState: "resource://services-sync/UIState.sys.mjs",
 });
 
 /**
@@ -91,13 +92,43 @@ export class BackupService {
    */
   static get MANIFEST_SCHEMA() {
     if (!BackupService.#manifestSchemaPromise) {
-      let schemaURL = `chrome://browser/content/backup/BackupManifest.${BackupService.MANIFEST_SCHEMA_VERSION}.schema.json`;
-      BackupService.#manifestSchemaPromise = fetch(schemaURL).then(response =>
-        response.json()
+      BackupService.#manifestSchemaPromise = BackupService._getSchemaForVersion(
+        BackupService.MANIFEST_SCHEMA_VERSION
       );
     }
 
     return BackupService.#manifestSchemaPromise;
+  }
+
+  /**
+   * The name of the post recovery file written into the newly created profile
+   * directory just after a profile is recovered from a backup.
+   *
+   * @type {string}
+   */
+  static get POST_RECOVERY_FILE_NAME() {
+    return "post-recovery.json";
+  }
+
+  /**
+   * Returns the schema for the backup manifest for a given version.
+   *
+   * This should really be #getSchemaForVersion, but for some reason,
+   * sphinx-js seems to choke on static async private methods (bug 1893362).
+   * We workaround this breakage by using the `_` prefix to indicate that this
+   * method should be _considered_ private, and ask that you not use this method
+   * outside of this class. The sphinx-js issue is tracked at
+   * https://github.com/mozilla/sphinx-js/issues/240.
+   *
+   * @private
+   * @param {number} version
+   *   The version of the schema to return.
+   * @returns {Promise<object>}
+   */
+  static async _getSchemaForVersion(version) {
+    let schemaURL = `chrome://browser/content/backup/BackupManifest.${version}.schema.json`;
+    let response = await fetch(schemaURL);
+    return response.json();
   }
 
   /**
@@ -113,7 +144,10 @@ export class BackupService {
       return this.#instance;
     }
     this.#instance = new BackupService(DefaultBackupResources);
-    this.#instance.takeMeasurements();
+
+    this.#instance.checkForPostRecovery().then(() => {
+      this.#instance.takeMeasurements();
+    });
 
     return this.#instance;
   }
@@ -147,6 +181,12 @@ export class BackupService {
   }
 
   /**
+   * @typedef {object} CreateBackupResult
+   * @property {string} stagingPath
+   *   The staging path for where the backup was created.
+   */
+
+  /**
    * Create a backup of the user's profile.
    *
    * @param {object} [options]
@@ -154,13 +194,15 @@ export class BackupService {
    * @param {string} [options.profilePath=PathUtils.profileDir]
    *   The path to the profile to backup. By default, this is the current
    *   profile.
-   * @returns {Promise<undefined>}
+   * @returns {Promise<CreateBackupResult|null>}
+   *   A promise that resolves to an object containing the path to the staging
+   *   folder where the backup was created, or null if the backup failed.
    */
   async createBackup({ profilePath = PathUtils.profileDir } = {}) {
     // createBackup does not allow re-entry or concurrent backups.
     if (this.#backupInProgress) {
       lazy.logConsole.warn("Backup attempt already in progress");
-      return;
+      return null;
     }
 
     this.#backupInProgress = true;
@@ -204,11 +246,19 @@ export class BackupService {
             resourcePath,
             profilePath
           );
-          lazy.logConsole.debug(
-            `Backup of resource with key ${resourceClass.key} completed`,
-            manifestEntry
-          );
-          manifest.resources[resourceClass.key] = manifestEntry;
+
+          if (manifestEntry === undefined) {
+            lazy.logConsole.error(
+              `Backup of resource with key ${resourceClass.key} returned undefined
+              as its ManifestEntry instead of null or an object`
+            );
+          } else {
+            lazy.logConsole.debug(
+              `Backup of resource with key ${resourceClass.key} completed`,
+              manifestEntry
+            );
+            manifest.resources[resourceClass.key] = manifestEntry;
+          }
         } catch (e) {
           lazy.logConsole.error(
             `Failed to backup resource: ${resourceClass.key}`,
@@ -246,7 +296,12 @@ export class BackupService {
       );
       await IOUtils.writeJSON(manifestPath, manifest);
 
-      await this.#finalizeStagingFolder(stagingPath);
+      let renamedStagingPath = await this.#finalizeStagingFolder(stagingPath);
+      lazy.logConsole.log(
+        "Wrote backup to staging directory at ",
+        renamedStagingPath
+      );
+      return { stagingPath: renamedStagingPath };
     } finally {
       this.#backupInProgress = false;
     }
@@ -280,7 +335,10 @@ export class BackupService {
    * The ISO date string should be formatted from YYYY-MM-DDTHH:mm:ss.sssZ to YYYY-MM-DDTHH-mm-ssZ
    *
    * @param {string} stagingPath
-   *  The path to the populated staging folder.
+   *   The path to the populated staging folder.
+   * @returns {Promise<string|null>}
+   *   The path to the renamed staging folder, or null if the stagingPath was
+   *   not pointing to a valid folder.
    */
   async #finalizeStagingFolder(stagingPath) {
     if (!(await IOUtils.exists(stagingPath))) {
@@ -288,7 +346,7 @@ export class BackupService {
       lazy.logConsole.error(
         `Failed to finalize staging folder. Cannot find ${stagingPath}.`
       );
-      return;
+      return null;
     }
 
     try {
@@ -319,10 +377,12 @@ export class BackupService {
           });
         }
       }
+      return renamedBackupPath;
     } catch (e) {
       lazy.logConsole.error(
         `Something went wrong while finalizing the staging folder. ${e}`
       );
+      throw e;
     }
   }
 
@@ -346,6 +406,16 @@ export class BackupService {
       profileName = profileSvc.currentProfile.name;
     }
 
+    // Default these to undefined rather than null so that they're not included
+    // the meta object if we're not signed in.
+    let accountID = undefined;
+    let accountEmail = undefined;
+    let fxaState = lazy.UIState.get();
+    if (fxaState.status == lazy.UIState.STATUS_SIGNED_IN) {
+      accountID = fxaState.uid;
+      accountEmail = fxaState.email;
+    }
+
     return {
       version: BackupService.MANIFEST_SCHEMA_VERSION,
       meta: {
@@ -357,9 +427,211 @@ export class BackupService {
         machineName: lazy.fxAccounts.device.getLocalName(),
         osName: Services.sysinfo.getProperty("name"),
         osVersion: Services.sysinfo.getProperty("version"),
+        accountID,
+        accountEmail,
       },
       resources: {},
     };
+  }
+
+  /**
+   * Given a decompressed backup archive at recoveryPath, this method does the
+   * following:
+   *
+   * 1. Reads in the backup manifest from the archive and ensures that it is
+   *    valid.
+   * 2. Creates a new named profile directory using the same name as the one
+   *    found in the backup manifest, but with a different prefix.
+   * 3. Iterates over each resource in the manifest and calls the recover()
+   *    method on each found BackupResource, passing in the associated
+   *    ManifestEntry from the backup manifest, and collects any post-recovery
+   *    data from those resources.
+   * 4. Writes a `post-recovery.json` file into the newly created profile
+   *    directory.
+   * 5. Returns the name of the newly created profile directory.
+   *
+   * @param {string} recoveryPath
+   *   The path to the decompressed backup archive on the file system.
+   * @param {boolean} [shouldLaunch=false]
+   *   An optional argument that specifies whether an instance of the app
+   *   should be launched with the newly recovered profile after recovery is
+   *   complete.
+   * @param {string} [profileRootPath=null]
+   *   An optional argument that specifies the root directory where the new
+   *   profile directory should be created. If not provided, the default
+   *   profile root directory will be used. This is primarily meant for
+   *   testing.
+   * @returns {Promise<nsIToolkitProfile>}
+   *   The nsIToolkitProfile that was created for the recovered profile.
+   * @throws {Exception}
+   *   In the event that recovery somehow failed.
+   */
+  async recoverFromBackup(
+    recoveryPath,
+    shouldLaunch = false,
+    profileRootPath = null
+  ) {
+    lazy.logConsole.debug("Recovering from backup at ", recoveryPath);
+
+    try {
+      // Read in the backup manifest.
+      let manifestPath = PathUtils.join(
+        recoveryPath,
+        BackupService.MANIFEST_FILE_NAME
+      );
+      let manifest = await IOUtils.readJSON(manifestPath);
+      if (!manifest.version) {
+        throw new Error("Backup manifest version not found");
+      }
+
+      if (manifest.version > BackupService.MANIFEST_SCHEMA_VERSION) {
+        throw new Error(
+          "Cannot recover from a manifest newer than the current schema version"
+        );
+      }
+
+      // Make sure that it conforms to the schema.
+      let manifestSchema = await BackupService._getSchemaForVersion(
+        manifest.version
+      );
+      let schemaValidationResult = lazy.JsonSchemaValidator.validate(
+        manifest,
+        manifestSchema
+      );
+      if (!schemaValidationResult.valid) {
+        lazy.logConsole.error(
+          "Backup manifest does not conform to schema:",
+          manifest,
+          manifestSchema,
+          schemaValidationResult
+        );
+        // TODO: Collect telemetry for this case. (bug 1891817)
+        throw new Error("Cannot recover from an invalid backup manifest");
+      }
+
+      // In the future, if we ever bump the MANIFEST_SCHEMA_VERSION and need to
+      // do any special behaviours to interpret older schemas, this is where we
+      // can do that, and we can remove this comment.
+
+      let meta = manifest.meta;
+
+      // Okay, we have a valid backup-manifest.json. Let's create a new profile
+      // and start invoking the recover() method on each BackupResource.
+      let profileSvc = Cc["@mozilla.org/toolkit/profile-service;1"].getService(
+        Ci.nsIToolkitProfileService
+      );
+      let profile = profileSvc.createUniqueProfile(
+        profileRootPath ? await IOUtils.getDirectory(profileRootPath) : null,
+        meta.profileName
+      );
+
+      let postRecovery = {};
+
+      // Iterate over each resource in the manifest and call recover() on each
+      // associated BackupResource.
+      for (let resourceKey in manifest.resources) {
+        let manifestEntry = manifest.resources[resourceKey];
+        let resourceClass = this.#resources.get(resourceKey);
+        if (!resourceClass) {
+          lazy.logConsole.error(
+            `No BackupResource found for key ${resourceKey}`
+          );
+          continue;
+        }
+
+        try {
+          lazy.logConsole.debug(
+            `Restoring resource with key ${resourceKey}. ` +
+              `Requires encryption: ${resourceClass.requiresEncryption}`
+          );
+          let resourcePath = PathUtils.join(recoveryPath, resourceKey);
+          let postRecoveryEntry = await new resourceClass().recover(
+            manifestEntry,
+            resourcePath,
+            profile.rootDir.path
+          );
+          postRecovery[resourceKey] = postRecoveryEntry;
+        } catch (e) {
+          lazy.logConsole.error(
+            `Failed to recover resource: ${resourceKey}`,
+            e
+          );
+        }
+      }
+
+      let postRecoveryPath = PathUtils.join(
+        profile.rootDir.path,
+        BackupService.POST_RECOVERY_FILE_NAME
+      );
+      await IOUtils.writeJSON(postRecoveryPath, postRecovery);
+
+      profileSvc.flush();
+
+      if (shouldLaunch) {
+        Services.startup.createInstanceWithProfile(profile);
+      }
+
+      return profile;
+    } catch (e) {
+      lazy.logConsole.error(
+        "Failed to recover from backup at ",
+        recoveryPath,
+        e
+      );
+      throw e;
+    }
+  }
+
+  /**
+   * Checks for the POST_RECOVERY_FILE_NAME in the current profile directory.
+   * If one exists, instantiates any relevant BackupResource's, and calls
+   * postRecovery() on them with the appropriate entry from the file. Once
+   * this is done, deletes the file.
+   *
+   * The file is deleted even if one of the postRecovery() steps rejects or
+   * fails.
+   *
+   * This function resolves silently if the POST_RECOVERY_FILE_NAME file does
+   * not exist, which should be the majority of cases.
+   *
+   * @param {string} [profilePath=PathUtils.profileDir]
+   *  The profile path to look for the POST_RECOVERY_FILE_NAME file. Defaults
+   *  to the current profile.
+   * @returns {Promise<undefined>}
+   */
+  async checkForPostRecovery(profilePath = PathUtils.profileDir) {
+    lazy.logConsole.debug(`Checking for post-recovery file in ${profilePath}`);
+    let postRecoveryFile = PathUtils.join(
+      profilePath,
+      BackupService.POST_RECOVERY_FILE_NAME
+    );
+
+    if (!(await IOUtils.exists(postRecoveryFile))) {
+      lazy.logConsole.debug("Did not find post-recovery file.");
+      return;
+    }
+
+    lazy.logConsole.debug("Found post-recovery file. Loading...");
+
+    try {
+      let postRecovery = await IOUtils.readJSON(postRecoveryFile);
+      for (let resourceKey in postRecovery) {
+        let postRecoveryEntry = postRecovery[resourceKey];
+        let resourceClass = this.#resources.get(resourceKey);
+        if (!resourceClass) {
+          lazy.logConsole.error(
+            `Invalid resource for post-recovery step: ${resourceKey}`
+          );
+          continue;
+        }
+
+        lazy.logConsole.debug(`Running post-recovery step for ${resourceKey}`);
+        await new resourceClass().postRecovery(postRecoveryEntry);
+        lazy.logConsole.debug(`Done post-recovery step for ${resourceKey}`);
+      }
+    } finally {
+      await IOUtils.remove(postRecoveryFile, { ignoreAbsent: true });
+    }
   }
 
   /**

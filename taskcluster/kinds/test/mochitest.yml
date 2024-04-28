@@ -269,16 +269,14 @@ mochitest-browser-chrome:
                     default: 7
             default:
                 by-test-platform:
-                    linux.*wayland.*/opt: 8
-                    linux.*wayland.*/debug: 12
                     linux.*-qr/debug: 16
                     linux.*64-asan-qr/opt: 16
                     linux.*64-tsan-qr/opt: 32
-                    macosx.*64-qr/debug: 12
                     macosx.*64.*/opt: 10
+                    windows11-32.*/opt: 10
                     windows.*-ccov.*/.*: 14
                     windows.*-asan-qr/opt: 14
-                    windows.*32-qr/debug: 12
+                    .*/debug: 12
                     default: 8
     max-run-time:
         by-variant:
@@ -302,7 +300,7 @@ mochitest-browser-chrome:
         chunked: true
     instance-size:
         by-test-platform:
-            linux.*64-asan-qr/opt: xlarge  # runs out of memory frequently
+            linux.*64-asan-qr/opt: xlarge-noscratch  # runs out of memory frequently
             default: default
     allow-software-gl-layers: false
 

@@ -51,7 +51,7 @@ add_task(async function test_ml_engine_basics() {
   const inferencePromise = summarizer.run({ data: "This gets echoed." });
 
   info("Wait for the pending downloads.");
-  await remoteClients.wasm.resolvePendingDownloads(1);
+  await remoteClients["ml-onnx-runtime"].resolvePendingDownloads(1);
 
   Assert.equal(
     (await inferencePromise).output,
@@ -82,7 +82,7 @@ add_task(async function test_ml_engine_wasm_rejection() {
   const inferencePromise = summarizer.run({ data: "This gets echoed." });
 
   info("Wait for the pending downloads.");
-  await remoteClients.wasm.rejectPendingDownloads(1);
+  await remoteClients["ml-onnx-runtime"].rejectPendingDownloads(1);
   //await remoteClients.models.resolvePendingDownloads(1);
 
   let error;
@@ -116,7 +116,7 @@ add_task(async function test_ml_engine_model_error() {
   const inferencePromise = summarizer.run("throw");
 
   info("Wait for the pending downloads.");
-  await remoteClients.wasm.resolvePendingDownloads(1);
+  await remoteClients["ml-onnx-runtime"].resolvePendingDownloads(1);
   //await remoteClients.models.resolvePendingDownloads(1);
 
   let error;
@@ -153,7 +153,7 @@ add_task(async function test_ml_engine_destruction() {
   const inferencePromise = summarizer.run({ data: "This gets echoed." });
 
   info("Wait for the pending downloads.");
-  await remoteClients.wasm.resolvePendingDownloads(1);
+  await remoteClients["ml-onnx-runtime"].resolvePendingDownloads(1);
 
   Assert.equal(
     (await inferencePromise).output,
@@ -172,5 +172,59 @@ add_task(async function test_ml_engine_destruction() {
     "The summarizer is manually destroyed. The cleanup function should wait for the engine process to be destroyed."
   );
 
+  await cleanup();
+});
+
+/**
+ * Tests that we display a nice error message when the pref is off
+ */
+add_task(async function test_pref_is_off() {
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.ml.enable", false]],
+  });
+
+  info("Get the engine process");
+  let error;
+
+  try {
+    await EngineProcess.getMLEngineParent();
+  } catch (e) {
+    error = e;
+  }
+  is(
+    error?.message,
+    "MLEngine is disabled. Check the browser.ml prefs.",
+    "The error is correctly surfaced."
+  );
+
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.ml.enable", true]],
+  });
+});
+
+/**
+ * Tests that we verify the task name is valid
+ */
+add_task(async function test_invalid_task_name() {
+  const { cleanup, remoteClients } = await setup();
+
+  const options = new PipelineOptions({ taskName: "inv#alid" });
+  const mlEngineParent = await EngineProcess.getMLEngineParent();
+  const summarizer = mlEngineParent.getEngine(options);
+
+  let error;
+
+  try {
+    const res = summarizer.run({ data: "This gets echoed." });
+    await remoteClients["ml-onnx-runtime"].resolvePendingDownloads(1);
+    await res;
+  } catch (e) {
+    error = e;
+  }
+  is(
+    error?.message,
+    "Invalid task name. Task name should contain only alphanumeric characters and underscores/dashes.",
+    "The error is correctly surfaced."
+  );
   await cleanup();
 });

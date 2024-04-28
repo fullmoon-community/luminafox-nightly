@@ -2,6 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+// known to be loaded early in the startup process, and should be loaded eagerly
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+
 const lazy = {};
 ChromeUtils.defineESModuleGetters(
   lazy,
@@ -59,11 +62,25 @@ export class PipelineOptions {
   modelId = null;
 
   /**
+   * The revision for the specific model to be used by the pipeline.
+   *
+   * @type {?string}
+   */
+  modelRevision = null;
+
+  /**
    * The identifier for the tokenizer associated with the model, used for pre-processing inputs.
    *
    * @type {?string}
    */
   tokenizerId = null;
+
+  /**
+   * The revision for the tokenizer associated with the model, used for pre-processing inputs.
+   *
+   * @type {?string}
+   */
+  tokenizerRevision = null;
 
   /**
    * The identifier for any processor required by the model, used for additional input processing.
@@ -73,11 +90,26 @@ export class PipelineOptions {
   processorId = null;
 
   /**
+   * The revision for any processor required by the model, used for additional input processing.
+   *
+   * @type {?string}
+   */
+
+  processorRevision = null;
+
+  /**
    * The log level used in the worker
    *
    * @type {?string}
    */
   logLevel = null;
+
+  /**
+   * Name of the runtime wasm file
+   *
+   * @type {?string}
+   */
+  runtimeFilename = null;
 
   /**
    * Create a PipelineOptions instance.
@@ -101,10 +133,15 @@ export class PipelineOptions {
       "modelHubUrlTemplate",
       "timeoutMS",
       "modelId",
+      "modelRevision",
       "tokenizerId",
+      "tokenizerRevision",
       "processorId",
+      "processorRevision",
       "logLevel",
+      "runtimeFilename",
     ];
+
     Object.keys(options).forEach(key => {
       if (allowedKeys.includes(key)) {
         this[key] = options[key]; // Use bracket notation to access setter
@@ -126,9 +163,13 @@ export class PipelineOptions {
       modelHubUrlTemplate: this.modelHubUrlTemplate,
       timeoutMS: this.timeoutMS,
       modelId: this.modelId,
+      modelRevision: this.modelRevision,
       tokenizerId: this.tokenizerId,
+      tokenizerRevision: this.tokenizerRevision,
       processorId: this.processorId,
+      processorRevision: this.processorRevision,
       logLevel: this.logLevel,
+      runtimeFilename: this.runtimeFilename,
     };
   }
 
@@ -200,6 +241,15 @@ export class EngineProcess {
    * @returns {Promise<MLEngineParent>}
    */
   static async getMLEngineParent() {
+    // Bug 1890946 - enable the inference engine in release
+    if (!AppConstants.NIGHTLY_BUILD) {
+      throw new Error("MLEngine is only available in Nightly builds.");
+    }
+    // the pref is off by default
+    if (!Services.prefs.getBoolPref("browser.ml.enable")) {
+      throw new Error("MLEngine is disabled. Check the browser.ml prefs.");
+    }
+
     if (!this.mlEngineParent) {
       this.mlEngineParent = this.#attachBrowser({
         id: "ml-engine-browser",

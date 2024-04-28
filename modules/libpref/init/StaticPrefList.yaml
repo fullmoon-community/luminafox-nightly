@@ -1157,12 +1157,17 @@
   value: false
   mirror: never
 
-# Whether content analysis should allow content if there is a problem communicating
-# with the agent.
-- name: browser.contentanalysis.default_allow
-  type: bool
-  value: false
-  mirror: never
+# What content analysis should return if there is a problem communicating
+# with the agent. (see DefaultResponse enum in ContentAnalysis.h)
+# Make sure these stay in sync with the out-of-range check in Policies.sys.mjs.
+#
+#   0: Block all requests
+#   1: Warn on all requests (which lets the user decide)
+#   2: Allow all requests
+- name: browser.contentanalysis.default_result
+  type: uint32_t
+  value: 0
+  mirror: always
 
 # Is the IPC pipe to the DLP tool specific to the user or to the system?
 - name: browser.contentanalysis.is_per_user
@@ -7036,8 +7041,8 @@
   value: false
   mirror: always
 
-# Decode all images synchronously
-- name: image.decode-sync.enabled
+# Decode all images synchronously, intended to be used for reftests.
+- name: image.testing.decode-sync.enabled
   type: bool
   value: false
   mirror: always
@@ -7687,6 +7692,13 @@
     value: false
     mirror: always
     set_spidermonkey_pref: startup
+
+  # Experimental support for Float16Array in JavaScript.
+-   name: javascript.options.experimental.float16array
+    type: bool
+    value: false
+    mirror: always
+    set_spidermonkey_pref: startup
 #endif  // NIGHTLY_BUILD
 
 # Experimental support for ArrayBuffer.prototype.transfer{,ToFixedLength}() in JavaScript.
@@ -7903,6 +7915,12 @@
 #else
     value: false
 #endif
+    mirror: always
+    set_spidermonkey_pref: startup
+
+-   name: javascript.options.wasm_js_promise_integration
+    type: bool
+    value: false
     mirror: always
     set_spidermonkey_pref: startup
 
@@ -12465,6 +12483,15 @@
   value: 24
   mirror: always
 
+# This makes it so NS_HTTP_REFRESH_DNS is only
+# set on DNS resolutions when LOAD_FRESH_CONNECTION is set.
+# That's because we don't need to refresh DNS on
+# every page reload.
+- name: network.dns.only_refresh_on_fresh_connection
+  type: RelaxedAtomicBool
+  value: true
+  mirror: always
+
 # The proxy type. See nsIProtocolProxyService.idl
 #     PROXYCONFIG_DIRECT   = 0
 #     PROXYCONFIG_MANUAL   = 1
@@ -13590,6 +13617,33 @@
   value: 10
   mirror: once
 
+# Whether flooding prevention feature is enabled or not.
+- name: places.history.floodingPrevention.enabled
+  type: bool
+  value: false
+  mirror: always
+
+# Maximum elapsed time betwen a user interaction and a visit before starting to
+# apply flooding prevention.
+- name: places.history.floodingPrevention.maxSecondsFromLastUserInteraction
+  type: uint32_t
+  value: 3
+  mirror: always
+
+# Number of consecutive accesses to an origin in a short timeframe before
+# starting to restrict storing visits for it.
+- name: places.history.floodingPrevention.restrictionCount
+  type: uint32_t
+  value: 3
+  mirror: always
+
+# Duration of the timeframe where consecutive visits to an origin should happen
+# before starting to restrict storing visits for it.
+- name: places.history.floodingPrevention.restrictionExpireSeconds
+  type: uint32_t
+  value: 5
+  mirror: always
+
 #---------------------------------------------------------------------------
 # Prefs starting with "plain_text."
 #---------------------------------------------------------------------------
@@ -14205,7 +14259,7 @@
 # Main pref to enable / disable the feature.
 - name: privacy.bounceTrackingProtection.enabled
   type: bool
-  value: false
+  value: @IS_NIGHTLY_BUILD@
   mirror: once
 
 # How long to wait for a client redirect after a navigation ends.
@@ -14245,7 +14299,7 @@
 # without risking data loss. Telemetry is still collected normally.
 - name: privacy.bounceTrackingProtection.enableDryRunMode
   type: bool
-  value: false
+  value: true
   mirror: always
 
 # To be used in automated test environments to enable observer messages.

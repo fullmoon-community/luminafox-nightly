@@ -4,6 +4,7 @@ prefs = [
   "privacy.bounceTrackingProtection.enabled=true",
   "privacy.bounceTrackingProtection.enableTestMode=true",
   "privacy.bounceTrackingProtection.bounceTrackingPurgeTimerPeriodSec=0",
+  "privacy.bounceTrackingProtection.enableDryRunMode=false",
 ]
 support-files = [
   "file_start.html",
@@ -29,5 +30,3 @@ support-files = [
 ["browser_bouncetracking_stateful_storage.js"]
 
 ["browser_bouncetracking_stateful_web_worker.js"]
-
-["browser_bouncetracking_telemetry_purge_events.js"]

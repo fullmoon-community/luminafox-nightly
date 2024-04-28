@@ -11,6 +11,11 @@
 #include <stdint.h>
 #include <uiautomation.h>
 
+template <class T>
+class nsTArray;
+template <class T>
+class RefPtr;
+
 namespace mozilla {
 namespace a11y {
 
@@ -27,7 +32,9 @@ class uiaRawElmProvider : public IAccessibleEx,
                           public IExpandCollapseProvider,
                           public IScrollItemProvider,
                           public IValueProvider,
-                          public IRangeValueProvider {
+                          public IRangeValueProvider,
+                          public ISelectionProvider,
+                          public ISelectionItemProvider {
  public:
   static constexpr enum ProviderOptions kProviderOptions =
       static_cast<enum ProviderOptions>(ProviderOptions_ServerSideProvider |
@@ -145,6 +152,30 @@ class uiaRawElmProvider : public IAccessibleEx,
   virtual /* [propget] */ HRESULT STDMETHODCALLTYPE get_SmallChange(
       /* [retval][out] */ __RPC__out double* aRetVal);
 
+  // ISelectionProvider
+  virtual HRESULT STDMETHODCALLTYPE GetSelection(
+      /* [retval][out] */ __RPC__deref_out_opt SAFEARRAY** aRetVal);
+
+  virtual /* [propget] */ HRESULT STDMETHODCALLTYPE get_CanSelectMultiple(
+      /* [retval][out] */ __RPC__out BOOL* aRetVal);
+
+  virtual /* [propget] */ HRESULT STDMETHODCALLTYPE get_IsSelectionRequired(
+      /* [retval][out] */ __RPC__out BOOL* aRetVal);
+
+  // ISelectionItemProvider methods
+  virtual HRESULT STDMETHODCALLTYPE Select(void);
+
+  virtual HRESULT STDMETHODCALLTYPE AddToSelection(void);
+
+  virtual HRESULT STDMETHODCALLTYPE RemoveFromSelection(void);
+
+  virtual /* [propget] */ HRESULT STDMETHODCALLTYPE get_IsSelected(
+      /* [retval][out] */ __RPC__out BOOL* aRetVal);
+
+  virtual /* [propget] */ HRESULT STDMETHODCALLTYPE get_SelectionContainer(
+      /* [retval][out] */ __RPC__deref_out_opt IRawElementProviderSimple**
+          aRetVal);
+
  private:
   Accessible* Acc() const;
   bool IsControl();
@@ -152,7 +183,12 @@ class uiaRawElmProvider : public IAccessibleEx,
   bool HasTogglePattern();
   bool HasExpandCollapsePattern();
   bool HasValuePattern() const;
+  template <class Derived, class Interface>
+  RefPtr<Interface> GetPatternFromDerived();
+  bool HasSelectionItemPattern();
 };
+
+SAFEARRAY* AccessibleArrayToUiaArray(const nsTArray<Accessible*>& aAccs);
 
 }  // namespace a11y
 }  // namespace mozilla
