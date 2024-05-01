@@ -21,6 +21,7 @@
 #include "nsHashPropertyBag.h"
 #include "nsIClearDataService.h"
 #include "nsIObserverService.h"
+#include "nsIPermissionManager.h"
 #include "nsIPrincipal.h"
 #include "nsISupports.h"
 #include "nsServiceManagerUtils.h"
@@ -76,6 +77,12 @@ BounceTrackingProtection::BounceTrackingProtection() {
     MOZ_LOG(gBounceTrackingProtectionLog, LogLevel::Error,
             ("storage init failed"));
     return;
+  }
+
+  rv = MaybeMigrateUserInteractionPermissions();
+  if (NS_WARN_IF(NS_FAILED(rv))) {
+    MOZ_LOG(gBounceTrackingProtectionLog, LogLevel::Error,
+            ("user activation permission migration failed"));
   }
 
   // Schedule timer for tracker purging. The timer interval is determined by
@@ -225,7 +232,7 @@ nsresult BounceTrackingProtection::RecordStatefulBounces(
 }
 
 nsresult BounceTrackingProtection::RecordUserActivation(
-    nsIPrincipal* aPrincipal) {
+    nsIPrincipal* aPrincipal, Maybe<PRTime> aActivationTime) {
   MOZ_ASSERT(XRE_IsParentProcess());
   NS_ENSURE_ARG_POINTER(aPrincipal);
 
@@ -244,7 +251,12 @@ nsresult BounceTrackingProtection::RecordUserActivation(
       mStorage->GetOrCreateStateGlobal(aPrincipal);
   MOZ_ASSERT(globalState);
 
-  return globalState->RecordUserActivation(siteHost, PR_Now());
+  // Default to current time if not timestamp is provided.
+  if (aActivationTime.isNothing()) {
+    aActivationTime = Some(PR_Now());
+  }
+
+  return globalState->RecordUserActivation(siteHost, aActivationTime.extract());
 }
 
 NS_IMETHODIMP
@@ -424,6 +436,11 @@ BounceTrackingProtection::TestAddUserActivation(
   ToLowerCase(host);
 
   return stateGlobal->RecordUserActivation(host, aActivationTime);
+}
+
+NS_IMETHODIMP
+BounceTrackingProtection::TestMaybeMigrateUserInteractionPermissions() {
+  return MaybeMigrateUserInteractionPermissions();
 }
 
 RefPtr<BounceTrackingProtection::PurgeBounceTrackersMozPromise>
@@ -655,10 +672,107 @@ nsresult BounceTrackingProtection::ClearExpiredUserInteractions(
   return NS_OK;
 }
 
+nsresult BounceTrackingProtection::MaybeMigrateUserInteractionPermissions() {
+  // Only run the migration once.
+  if (StaticPrefs::
+          privacy_bounceTrackingProtection_hasMigratedUserActivationData()) {
+    return NS_OK;
+  }
+
+  MOZ_LOG(
+      gBounceTrackingProtectionLog, LogLevel::Info,
+      ("%s: Importing user activation data from permissions", __FUNCTION__));
+
+  // Get all user activation permissions that are within our user activation
+  // lifetime. We don't care about the rest since they are considered expired
+  // for BTP.
+
+  nsresult rv = NS_OK;
+  nsCOMPtr<nsIPermissionManager> permManager =
+      do_GetService(NS_PERMISSIONMANAGER_CONTRACTID, &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+  NS_ENSURE_TRUE(permManager, NS_ERROR_FAILURE);
+
+  // Construct the since time param. The permission manager expects epoch in
+  // miliseconds.
+  int64_t nowMS = PR_Now() / PR_USEC_PER_MSEC;
+  int64_t activationLifetimeMS =
+      static_cast<int64_t>(
+          StaticPrefs::
+              privacy_bounceTrackingProtection_bounceTrackingActivationLifetimeSec()) *
+      PR_MSEC_PER_SEC;
+  int64_t since = nowMS - activationLifetimeMS;
+  MOZ_ASSERT(since > 0);
+
+  // Get all user activation permissions last modified between "since" and now.
+  nsTArray<RefPtr<nsIPermission>> userActivationPermissions;
+  rv = permManager->GetAllByTypeSince("storageAccessAPI"_ns, since,
+                                      userActivationPermissions);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  MOZ_LOG(gBounceTrackingProtectionLog, LogLevel::Debug,
+          ("%s: Found %zu (non-expired) user activation permissions",
+           __FUNCTION__, userActivationPermissions.Length()));
+
+  for (const auto& perm : userActivationPermissions) {
+    nsCOMPtr<nsIPrincipal> permPrincipal;
+
+    rv = perm->GetPrincipal(getter_AddRefs(permPrincipal));
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+      continue;
+    }
+    MOZ_ASSERT(permPrincipal);
+
+    // The time the permission was last modified is the time of last user
+    // activation.
+    int64_t modificationTimeMS;
+    rv = perm->GetModificationTime(&modificationTimeMS);
+    NS_ENSURE_SUCCESS(rv, rv);
+    MOZ_ASSERT(modificationTimeMS >= since,
+               "Unexpected permission modification time");
+
+    // We may end up with duplicates here since user activation permissions are
+    // tracked by origin, while BTP tracks user activation by site host.
+    // RecordUserActivation is responsible for only keeping the most recent user
+    // activation flag for a given site host and needs to make sure existing
+    // activation flags are not overwritten by older timestamps.
+    // RecordUserActivation expects epoch in microseconds.
+    rv = RecordUserActivation(permPrincipal,
+                              Some(modificationTimeMS * PR_USEC_PER_MSEC));
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+      continue;
+    }
+  }
+
+  // Migration successful, set the pref to indicate that we have migrated.
+  return mozilla::Preferences::SetBool(
+      "privacy.bounceTrackingProtection.hasMigratedUserActivationData", true);
+}
+
 // ClearDataCallback
 
 NS_IMPL_ISUPPORTS(BounceTrackingProtection::ClearDataCallback,
                   nsIClearDataCallback);
+
+BounceTrackingProtection::ClearDataCallback::ClearDataCallback(
+    ClearDataMozPromise::Private* aPromise, const nsACString& aHost)
+    : mHost(aHost), mClearDurationTimer(0), mPromise(aPromise) {
+  MOZ_ASSERT(!aHost.IsEmpty(), "Host must not be empty");
+  if (!StaticPrefs::privacy_bounceTrackingProtection_enableDryRunMode()) {
+    // Only collect timing information when actually performing the deletion
+    mClearDurationTimer =
+        glean::bounce_tracking_protection::purge_duration.Start();
+    MOZ_ASSERT(mClearDurationTimer);
+  }
+};
+
+BounceTrackingProtection::ClearDataCallback::~ClearDataCallback() {
+  mPromise->Reject(0, __func__);
+  if (mClearDurationTimer) {
+    glean::bounce_tracking_protection::purge_duration.Cancel(
+        std::move(mClearDurationTimer));
+  }
+}
 
 // nsIClearDataCallback implementation
 NS_IMETHODIMP BounceTrackingProtection::ClearDataCallback::OnDataDeleted(
@@ -670,7 +784,17 @@ NS_IMETHODIMP BounceTrackingProtection::ClearDataCallback::OnDataDeleted(
             ("%s: Cleared %s", __FUNCTION__, mHost.get()));
     mPromise->Resolve(std::move(mHost), __func__);
   }
+  RecordClearDurationTelemetry();
   return NS_OK;
+}
+
+void BounceTrackingProtection::ClearDataCallback::
+    RecordClearDurationTelemetry() {
+  if (mClearDurationTimer) {
+    glean::bounce_tracking_protection::purge_duration.StopAndAccumulate(
+        std::move(mClearDurationTimer));
+    mClearDurationTimer = 0;
+  }
 }
 
 }  // namespace mozilla

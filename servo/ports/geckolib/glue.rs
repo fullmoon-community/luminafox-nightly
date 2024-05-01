@@ -2549,6 +2549,11 @@ fn desugared_selector_list(rules: &ThinVec<&LockedStyleRule>) -> SelectorList {
 }
 
 #[no_mangle]
+pub extern "C" fn Servo_StyleRule_GetSelectorList(rules: &ThinVec<&LockedStyleRule>) -> *mut SelectorList {
+    Box::into_raw(Box::new(desugared_selector_list(rules)))
+}
+
+#[no_mangle]
 pub extern "C" fn Servo_StyleRule_GetSelectorDataAtIndex(
     rules: &ThinVec<&LockedStyleRule>,
     index: u32,
@@ -2582,7 +2587,8 @@ pub extern "C" fn Servo_StyleRule_SelectorMatchesElement(
     relevant_link_visited: bool,
 ) -> bool {
     use selectors::matching::{
-        matches_selector, MatchingContext, MatchingMode, NeedsSelectorFlags, VisitedHandlingMode,
+        matches_selector, IncludeStartingStyle, MatchingContext, MatchingMode, NeedsSelectorFlags,
+        VisitedHandlingMode,
     };
     let selectors = desugared_selector_list(rules);
     let Some(selector) = selectors.slice().get(index as usize) else {
@@ -2623,6 +2629,7 @@ pub extern "C" fn Servo_StyleRule_SelectorMatchesElement(
         /* bloom_filter = */ None,
         &mut selector_caches,
         visited_mode,
+        IncludeStartingStyle::No,
         quirks_mode,
         NeedsSelectorFlags::No,
         MatchingForInvalidation::No,
